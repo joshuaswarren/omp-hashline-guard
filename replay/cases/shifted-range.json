@@ -1,0 +1,26 @@
+{
+ "title": "Shifted PUT range deletes the line after the block (real edit, 2026-11-02)",
+ "files": {
+  "provider.js": "// Test-only omp extension: a provider whose \"model\" replays a fixed script of\n// tool calls, so real edit inputs run through omp's real edit tool without a\n// language model. Script: JSON array of turns at $REPLAY_SCRIPT; each turn is\n// an array of { name, arguments }. After the last turn it answers \"done\".\n\nimport { readFileSync } from \"node:fs\";\nimport { AssistantMessageEventStream } from \"@oh-my-pi/pi-ai\";\n\nexport default function scriptedProvider(pi) {\n\tconst script = JSON.parse(readFileSync(process.env.REPLAY_SCRIPT, \"utf8\"));\n\tpi.registerProvider(\"replay\", {\n\t\tbaseUrl: \"https://replay.invalid/\",\n\t\tapiKey: \"unused\",\n\t\tapi: \"replay-script\",\n\t\tstreamSimple(model, context) {\n\t\t\tconst stream = new AssistantMessageEventStream();\n\t\t\tconst turn = context.messages.filter((m) => m.role === \"assistant\").length;\n\t\t\tconst calls = script[turn];\n\t\t\tconst message = {\n\t\t\t\trole: \"assistant\",\n\t\t\t\tcontent: calls\n\t\t\t\t\t? calls.map((c, i) => ({ type: \"toolCall\", id: `replay-${turn}-${i}`, name: c.name, arguments: c.arguments }))\n\t\t\t\t\t: [{ type: \"text\", text: \"done\" }],\n\t\t\t\tapi: \"replay-script\",\n\t\t\t\tprovider: \"replay\",\n\t\t\t\tmodel: model.id,\n\t\t\t\tusage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },\n\t\t\t\tstopReason: calls ? \"toolUse\" : \"stop\",\n\t\t\t\ttimestamp: Date.now(),\n\t\t\t};\n\t\t\tqueueMicrotask(() => {\n\t\t\t\tstream.push({ type: \"start\", partial: message });\n\t\t\t\tstream.push({ type: \"done\", reason: message.stopReason, message });\n\t\t\t});\n\t\t\treturn stream;\n\t\t},\n\t\tmodels: [\n\t\t\t{\n\t\t\t\tid: \"script\",\n\t\t\t\tname: \"Replay script\",\n\t\t\t\treasoning: false,\n\t\t\t\tinput: [\"text\"],\n\t\t\t\tcost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },\n\t\t\t\tcontextWindow: 128000,\n\t\t\t\tmaxTokens: 16000,\n\t\t\t},\n\t\t],\n\t});\n}\n"
+ },
+ "turns": [
+  [
+   {
+    "name": "read",
+    "arguments": {
+     "path": "provider.js",
+     "i": "read"
+    }
+   }
+  ],
+  [
+   {
+    "name": "edit",
+    "arguments": {
+     "i": "edit",
+     "input": "[provider.js#$TAG(provider.js)]\nPUT 32.=35:\n+\t\t\tqueueMicrotask(() => {\n+\t\t\t\tconst blocks = message.content;\n+\t\t\t\tconst partial = { ...message, content: [] };\n+\t\t\t\tstream.push({ type: \"start\", partial });\n+\t\t\t\tblocks.forEach((block, i) => {\n+\t\t\t\t\tpartial.content.push(block);\n+\t\t\t\t\tif (block.type === \"text\") {\n+\t\t\t\t\t\tstream.push({ type: \"text_start\", contentIndex: i, partial });\n+\t\t\t\t\t\tstream.push({ type: \"text_end\", contentIndex: i, content: block.text, partial });\n+\t\t\t\t\t} else {\n+\t\t\t\t\t\tstream.push({ type: \"toolcall_start\", contentIndex: i, partial });\n+\t\t\t\t\t\tstream.push({ type: \"toolcall_end\", contentIndex: i, toolCall: block, partial });\n+\t\t\t\t\t}\n+\t\t\t\t});\n+\t\t\t\tstream.push({ type: \"done\", reason: message.stopReason, message });\n+\t\t\t});"
+    }
+   }
+  ]
+ ]
+}

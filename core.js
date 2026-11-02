@@ -307,6 +307,7 @@ export function detectDamage({ path, before, after, resultText = "", ops = [] })
 	if (literal) findings.push(`the body row \`${literal[1]}\` is an edit op, and it was written into the file as text`);
 	const a = before.split("\n");
 	const b = after.split("\n");
+	// Past MAX_DIFF_DISTANCE there is no diff, so only omp's own warnings and shiftedRanges apply.
 	const hunks = diffLines(a, b) ?? [];
 	const opener = BLOCK_OPENER.find(([ext]) => ext.test(path))?.[1];
 	const fenced = MARKDOWN_EXT.test(path) ? fencedLines(b) : new Set();

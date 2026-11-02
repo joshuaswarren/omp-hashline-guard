@@ -203,8 +203,11 @@ export function createGuard() {
 
 		files.forEach((s, i) => {
 			try {
-				// Only undo our own write: skip a file someone changed after the edit.
-				if (afters[i] !== s.before && readText(s.abs) === afters[i]) writeFileSync(s.abs, s.before);
+				if (afters[i] === s.before) return;
+
+				// Only undo our own write: a file someone changed after the edit stays as it is.
+				if (readText(s.abs) !== afters[i]) failed.push(`${s.display}: changed again after the edit, so it was not undone`);
+				else writeFileSync(s.abs, s.before);
 			} catch (error) {
 				failed.push(`${s.display}: ${error.message}`);
 			}

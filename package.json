@@ -1,0 +1,29 @@
+{
+	"name": "omp-hashline-guard",
+	"version": "1.0.0",
+	"description": "omp extension that refuses hashline edits which damage files, rebinds edit headers to the file that was read, and explains stale-tag rejections.",
+	"type": "module",
+	"license": "MIT",
+	"author": {
+		"name": "Joshua Warren",
+		"url": "https://github.com/joshuaswarren"
+	},
+	"main": "./index.js",
+	"files": ["core.js", "index.js", "README.md", "LICENSE"],
+	"omp": {
+		"extensions": ["./index.js"]
+	},
+	"scripts": {
+		"test": "bun test ./test.js",
+		"lint": "oxlint"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/joshuaswarren/omp-hashline-guard.git"
+	},
+	"keywords": ["omp", "oh-my-pi", "hashline", "edit", "plugin"],
+	"devDependencies": {
+		"@oxlint/plugins": "1.90.0",
+		"oxlint": "1.90.0"
+	}
+}

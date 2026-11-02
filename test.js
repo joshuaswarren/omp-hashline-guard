@@ -47,7 +47,7 @@ describe("detectDamage", () => {
 	});
 
 	test("flags a duplicated block at the end of the edited range", () => {
-		const after = fruit.replace("Line B about bananas.\n", "Line B about blueberries.\nLine C about cherries.\n");
+		const after = fruit.replace("Line B about bananas.\n", "Line B about blueberries.\nLine C about cherries.\n\n");
 		expect(damage(fruit, after).join(" ")).toContain("range end missed lines");
 	});
 
@@ -66,6 +66,30 @@ describe("detectDamage", () => {
 		const after = py.replace(/\n\ndef beta[\s\S]*$/, "\n");
 		expect(damage(py, after, "", "", "a.py")).toEqual([]);
 	});
+
+	test("accepts wrapping a condition with a hanging indent", () => {
+		const src = "def f(a, b):\n    if a:\n        return 1\n    return 2\n";
+		const after = src.replace("    if a:\n", "    if (a and\n            b):\n");
+		expect(damage(src, after, "", "", "f.py")).toEqual([]);
+	});
+
+	test("accepts a second identical line next to the first", () => {
+		const src = "test('x', () => {\n\texpect(f()).toBe(1);\n});\n";
+		expect(damage(src, src.replace("toBe(1);\n", "toBe(1);\n\texpect(f()).toBe(1);\n"), "", "", "x.test.js")).toEqual([]);
+	});
+
+	test("accepts edit syntax inside a Markdown code fence and REM in a batch file", () => {
+		const md = "# Notes\n\n```\n```\n";
+		expect(damage(md, md.replace("```\n```", "```\nPUT 4.=9:\n```"), "", "", "notes.md")).toEqual([]);
+		expect(damage("@echo off\n", "@echo off\nREM greet\n", "", "", "run.bat")).toEqual([]);
+	});
+});
+
+describe("fileTag normalization", () => {
+	test("drops a BOM and treats CRLF like LF, as omp does", () => {
+		expect(fileTag(`\uFEFF${fruit}`)).toBe("8678");
+		expect(fileTag(fruit.replaceAll("\n", "\r\n"))).toBe("8678");
+	});
 });
 
 describe("tagCandidates", () => {
@@ -74,14 +98,22 @@ describe("tagCandidates", () => {
 		["/w/fix-2/docs/work/T-2/packet.md", new Set(["1111"])],
 	]);
 
-	test("finds the one read file whose path ends with the authored path", () => {
+	test("finds the read file with the same tag and name, absolute or relative", () => {
 		expect(tagCandidates("docs/work/T-1/packet.md", "7A27", known)).toEqual(["/w/fix-1/docs/work/T-1/packet.md"]);
 		expect(tagCandidates("w/fix-1/docs/work/T-1/packet.md", "7A27", known)).toHaveLength(1);
 		expect(tagCandidates("packet.md", "7A27", known)).toHaveLength(1);
+		expect(tagCandidates("/repo-wt/docs/work/T-1/packet.md", "7A27", known)).toHaveLength(1);
 	});
-	test("ignores other tags and paths that are not a suffix", () => {
-		expect(tagCandidates("docs/work/T-1/packet.md", "1111", known)).toEqual([]);
-		expect(tagCandidates("docs/worktrees/T-1/packet.md", "7A27", known)).toEqual([]);
+
+	test("ignores other tags and other file names", () => {
+		expect(tagCandidates("docs/work/T-1/packet.md", "2222", known)).toEqual([]);
+		expect(tagCandidates("docs/work/T-1/notes.md", "7A27", known)).toEqual([]);
+	});
+
+	test("keeps only the candidates sharing the longest path tail", () => {
+		const two = new Map([...known, ["/w/other/packet.md", new Set(["7A27"])]]);
+		expect(tagCandidates("work/T-1/packet.md", "7A27", two)).toEqual(["/w/fix-1/docs/work/T-1/packet.md"]);
+		expect(tagCandidates("packet.md", "7A27", two)).toHaveLength(2);
 	});
 });
 

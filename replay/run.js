@@ -1,7 +1,10 @@
 // Replays scripted tool calls through a real `omp -p` session, with or
 // without the guard, and reports tool results and final file contents.
 //
-//   bun replay/run.js <case.json> [--guard] [--json]
+//   bun replay/run.js <case.json> [--guard | --installed] [--json]
+//
+// --guard loads ../index.js from this checkout. --installed loads no explicit
+// guard and keeps extension discovery on, so it tests the plugin installed in omp.
 //
 // case.json: { "files": { "<rel>": "<text>" }, "cwd": "<rel dir>", "turns": [[{ name, arguments }]] }
 // Every string in files/cwd/turns may use $ROOT for the temporary case root.
@@ -15,7 +18,7 @@ import { fileTag } from "../core.js";
 
 const here = dirname(new URL(import.meta.url).pathname);
 
-export async function replay(spec, { guard = false, timeoutMs = 60_000 } = {}) {
+export async function replay(spec, { guard = false, installed = false, timeoutMs = 60_000 } = {}) {
 	const root = mkdtempSync(join(tmpdir(), "hg-replay-"));
 
 	try {
@@ -32,7 +35,7 @@ export async function replay(spec, { guard = false, timeoutMs = 60_000 } = {}) {
 		writeFileSync(scriptPath, JSON.stringify(turns));
 		const cwd = join(root, spec.cwd ?? ".");
 		mkdirSync(cwd, { recursive: true });
-		const args = ["-p", "--no-extensions", "-e", join(here, "scripted-provider.js")];
+		const args = ["-p", ...(installed ? [] : ["--no-extensions"]), "-e", join(here, "scripted-provider.js")];
 
 		if (guard) args.push("-e", resolve(here, "../index.js"));
 		args.push("--model", "replay/script", "--tools", "read,edit,bash", "--mode", "json", "--no-lsp", "replay");
@@ -83,7 +86,7 @@ export async function replay(spec, { guard = false, timeoutMs = 60_000 } = {}) {
 if (import.meta.main) {
 	const [file, ...flags] = process.argv.slice(2);
 	const spec = JSON.parse(readFileSync(file, "utf8"));
-	const out = await replay(spec, { guard: flags.includes("--guard") });
+	const out = await replay(spec, { guard: flags.includes("--guard"), installed: flags.includes("--installed") });
 
 	if (flags.includes("--json")) console.log(JSON.stringify(out));
 	else {

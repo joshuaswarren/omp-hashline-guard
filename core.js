@@ -16,18 +16,32 @@ const OP_RE = /^(PUT|CUT)\s+[<>]?(\d+)(?:\.=(\d+))?/;
 const OP_TEXT_RE =
 	/^\s*\+?\s*(?:(?:PUT|CUT)\s+[<>]?\d+\s*(?:\.=|\*|:|\.|\+|$)|(?:REM|MV)(?:\s|$)|\*\*\* (?:Begin|End|Update File|Add File) |\[[^\]\s]+#[0-9A-F]{4}\]\s*$)/;
 
+/** Batch files use `REM` for comments. */
+const REM_COMMENT_EXT = /\.(bat|cmd|bas)$/i;
+const MARKDOWN_EXT = /\.(md|markdown|mdx)$/i;
 const NATIVE_PARSE_RE = /introduced a syntax error near line (\d+)|no longer parses after this edit/;
 const NATIVE_LITERAL_OP_RE = /body row `(.*?)` is itself a valid hunk header/;
 const STALE_RE = /file changed between read and edit/;
-const INDENT_OPENER_EXT = /\.(py|pyi|yaml|yml)$/i;
+
+/** Python statements that open a block, and YAML keys with no inline value. */
+const BLOCK_OPENER = [
+	[/\.pyi?$/i, /^\s*(?:async\s+def|def|class|if|elif|else|for|while|with|try|except|finally|match|case)\b.*:$/],
+	[/\.ya?ml$/i, /^\s*[^\s#][^:#]*:$/],
+];
+
+/** Past this edit distance the line diff gives up and reports one whole-file hunk. */
+const MAX_DIFF_DISTANCE = 1000;
 
 /**
- * The four-hex hashline tag omp mints for `text`: xxHash32 (seed 0) of the text
- * with trailing spaces, tabs and CRs stripped from every line, low 16 bits.
- * Mirrors `file_hash` in omp's pi-edit crate (store.rs).
+ * The four-hex hashline tag omp mints for `text`: xxHash32 (seed 0) of the
+ * BOM-stripped, LF-normalized text with trailing spaces, tabs and CRs stripped
+ * from every line, low 16 bits. Mirrors `file_hash` and the read
+ * normalization in omp's pi-edit crate (store.rs).
  */
 export function fileTag(text) {
 	const stripped = text
+		.replace(/^\uFEFF/, "")
+		.replace(/\r\n?/g, "\n")
 		.split("\n")
 		.map((line) => line.replace(/[ \t\r]+$/, ""))
 		.join("\n");
@@ -129,30 +143,47 @@ export function parseViews(text) {
 	return views;
 }
 
-function pathSuffix(raw) {
+function pathSegments(raw) {
 	return unquote(raw.trim())
 		.replace(/\\\//g, "/")
-		.replace(/^(~\/|\.\/|\/)+/, "");
+		.split("/")
+		.filter((s) => s && s !== "." && s !== "~");
 }
 
 /**
- * Paths read in this process whose snapshot tag is `tag` and whose absolute
- * path ends with the authored path. `known` maps absolute path to a Set of tags.
+ * Files read in this process under `tag` with the same file name as the
+ * authored path, keeping those that share the longest path tail with it.
+ * omp's own recovery matches name and tag the same way, inside the session
+ * directory only. `known` maps absolute path to a Set of tags.
  */
 export function tagCandidates(rawPath, tag, known) {
-	const suffix = pathSuffix(rawPath);
+	const want = pathSegments(rawPath);
 
-	if (!suffix || !tag) return [];
-	const out = [];
+	if (!want.length || !tag) return [];
+	let best = 0;
+	let out = [];
 
 	for (const [abs, tags] of known) {
-		if (tags.has(tag) && (abs === `/${suffix}` || abs.endsWith(`/${suffix}`))) out.push(abs);
+		if (!tags.has(tag)) continue;
+		const have = abs.split("/");
+		let shared = 0;
+
+		while (shared < want.length && shared < have.length && want.at(-1 - shared) === have.at(-1 - shared)) shared++;
+
+		if (shared === 0 || shared < best) continue;
+
+		if (shared > best) out = [];
+		best = shared;
+		out.push(abs);
 	}
 
 	return out;
 }
 
-/** Minimal Myers diff over line arrays; returns hunks of [aStart, aEnd, bStart, bEnd). */
+/**
+ * Minimal Myers diff over line arrays; returns hunks of [aStart, aEnd, bStart,
+ * bEnd), or undefined when the texts differ by more than MAX_DIFF_DISTANCE lines.
+ */
 export function diffLines(a, b) {
 	let pre = 0;
 
@@ -163,6 +194,8 @@ export function diffLines(a, b) {
 	const A = a.slice(pre, a.length - suf);
 	const B = b.slice(pre, b.length - suf);
 	const ops = myers(A, B);
+
+	if (!ops) return undefined;
 	const hunks = [];
 	let i = 0;
 	let j = 0;
@@ -195,11 +228,11 @@ function myers(a, b) {
 
 	if (max === 0) return [];
 
-	if (n * m > 4_000_000) return [...Array(n).fill("-"), ...Array(m).fill("+")];
+	if (Math.abs(n - m) > MAX_DIFF_DISTANCE) return undefined;
 	const v = new Map([[1, 0]]);
 	const trace = [];
 
-	for (let d = 0; d <= max; d++) {
+	for (let d = 0; d <= Math.min(max, MAX_DIFF_DISTANCE); d++) {
 		trace.push(new Map(v));
 
 		for (let k = -d; k <= d; k += 2) {
@@ -217,7 +250,7 @@ function myers(a, b) {
 		}
 	}
 
-	return [];
+	return undefined;
 }
 
 function backtrack(trace, a, b, dEnd) {
@@ -274,20 +307,24 @@ export function detectDamage({ path, before, after, resultText = "", ops = [] })
 	if (literal) findings.push(`the body row \`${literal[1]}\` is an edit op, and it was written into the file as text`);
 	const a = before.split("\n");
 	const b = after.split("\n");
+	const hunks = diffLines(a, b) ?? [];
+	const opener = BLOCK_OPENER.find(([ext]) => ext.test(path))?.[1];
+	const fenced = MARKDOWN_EXT.test(path) ? fencedLines(b) : new Set();
 
-	for (const [a0, a1, b0, b1] of diffLines(a, b)) {
+	for (const [a0, a1, b0, b1] of hunks) {
 		for (let n = b0; n < b1; n++) {
-			if (!literal && OP_TEXT_RE.test(b[n])) {
-				findings.push(`line ${n + 1} \`${b[n].trim()}\` is edit syntax, not file content`);
-				break;
-			}
+			if (literal || fenced.has(n) || !OP_TEXT_RE.test(b[n])) continue;
+
+			if (REM_COMMENT_EXT.test(path) && /^\s*REM\b/i.test(b[n])) continue;
+			findings.push(`line ${n + 1} \`${b[n].trim()}\` is edit syntax, not file content`);
+			break;
 		}
 
 		const dup = boundaryDuplicate(a, b, b0, b1);
 
 		if (dup) findings.push(dup);
 
-		if (INDENT_OPENER_EXT.test(path)) findings.push(...orphanedOpeners(a, b, a0, a1, b0, b1));
+		if (opener) findings.push(...orphanedOpeners(opener, a, b, a0, a1, b0, b1));
 	}
 
 	return [...new Set(findings)];
@@ -310,8 +347,9 @@ function countBlock(lines, block) {
 function boundaryDuplicate(a, b, b0, b1) {
 	const width = b1 - b0;
 
-	for (let m = Math.min(5, width); m >= 1; m--) {
-		for (let gap = 0; gap <= (m >= 2 ? 3 : 0); gap++) {
+	// Single repeated lines (a second assert, a second log call) are often meant; only blocks count.
+	for (let m = Math.min(5, width); m >= 2; m--) {
+		for (let gap = 0; gap <= 3; gap++) {
 			const head = b.slice(b0, b0 + m);
 
 			if (head.some(meaningful) && sameBlock(b, b0, b0 - gap - m, m) && countBlock(b, head) > countBlock(a, head)) {
@@ -329,21 +367,36 @@ function boundaryDuplicate(a, b, b0, b1) {
 	return undefined;
 }
 
+/** Line indexes inside fenced code blocks of a Markdown file. */
+function fencedLines(lines) {
+	const inside = new Set();
+	let open = false;
+
+	lines.forEach((line, i) => {
+		if (/^\s*(```|~~~)/.test(line)) open = !open;
+		else if (open) inside.add(i);
+	});
+
+	return inside;
+}
+
 /** Removed block openers (`def x():`, `key:`) whose indented body the edit kept. */
-function orphanedOpeners(a, b, a0, a1, b0, b1) {
+function orphanedOpeners(opener, a, b, a0, a1, b0, b1) {
 	const out = [];
 	const added = b.slice(b0, b1);
+	const code = (l) => l.replace(/\s+#.*$/, "").trimEnd();
 
 	for (let i = a0; i < a1; i++) {
-		const line = a[i].replace(/\s+#.*$/, "");
+		const line = code(a[i]);
 
-		if (!line.trim().endsWith(":") || line.trim().startsWith("#")) continue;
+		if (!opener.test(line)) continue;
 		let next = i + 1;
 
 		while (next < a.length && (!a[next].trim() || (next < a1 && indentOf(a[next]) > indentOf(line)))) next++;
 
 		if (next < a1 || next >= a.length || indentOf(a[next]) <= indentOf(line)) continue;
-		const replaced = added.some((l) => indentOf(l) === indentOf(line) && l.replace(/\s+#.*$/, "").trim().endsWith(":"));
+		// A rewritten opener may wrap (hanging indent), so its `:` can sit deeper than the old line.
+		const replaced = added.some((l) => indentOf(l) >= indentOf(line) && code(l).endsWith(":"));
 
 		if (!replaced) out.push(`the edit removed the block opener \`${line.trim()}\` (old line ${i + 1}) but kept its body`);
 	}

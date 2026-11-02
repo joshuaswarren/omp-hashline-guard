@@ -6,13 +6,13 @@ An [omp](https://github.com/can1357/oh-my-pi) extension for the hashline `edit` 
 
 1. **Refuses damaging edits.** After an edit applies, the guard compares the file before and after. When it finds damage, it writes the old content back and returns an error that names the problem. The header tag stays valid, so the agent fixes its numbers and re-issues in one call. It refuses an edit when:
    - omp reports that the file no longer parses;
-   - a body row is an edit op (`+PUT 4.=9:`, `+CUT 12`, `+REM`, a `[path#TAG]` header) and was written as text;
+   - a body row is an edit op (`+PUT 4.=9:`, `+CUT 12`, `+REM`, a `[path#TAG]` header) and was written as text (Markdown code fences and `REM` in batch files are allowed);
    - a `PUT s.=e:` range is off by 1 to 3 lines, so the lines at the far end are deleted;
-   - the body repeats lines that sit just outside the range (a range end that is too wide or too narrow);
-   - in Python or YAML, the edit removes a block opener (`def f():`, `key:`) but keeps its body.
+   - the body repeats a block of 2 or more lines that sits just outside the range (a range end that is too wide or too narrow);
+   - in Python or YAML, the edit removes a block opener (`def f():`, `if x:`, `key:`) but keeps its body.
 
    To apply a refused edit as written, send the identical edit again.
-2. **Rebinds a header path that does not exist.** When the agent read `/work/fix-7/docs/packet.md` and then edits `[docs/packet.md#TAG]` from another directory, omp reports "File not found". The guard sends the edit to the one file that was read under that tag and whose path ends with the header path.
+2. **Rebinds a header path that does not exist.** When the agent read `/work/fix-7/docs/packet.md` and then edits `[docs/packet.md#TAG]` from another directory, or writes a wrong absolute path, omp reports "File not found". omp's own recovery matches the file name and tag only inside the session directory. The guard sends the edit to the file read under that tag with the same name that shares the longest path tail with the header, when exactly one such file exists.
 3. **Stops edits to the wrong copy.** When the header path resolves to a file this session never read, and the tag came from another file with the same path tail (another checkout), the guard refuses once and names the right path.
 4. **Explains stale tags.** After omp rejects a stale tag, the guard adds where the anchored lines are now, or says that the edit is already in the file. It also refuses a retry that pairs the new tag with the old line numbers, because those numbers now point at other lines.
 

@@ -2,13 +2,14 @@
 // damaging files and shortens recovery from rejected edits.
 //
 // 1. tool_call: rebinds a header path that does not exist to the one file
-//    this process read under the same tag (worktree and absolute-path slips),
-//    and refuses a header that resolves to a file the agent never read while
-//    the tag came from another checkout.
+//    this process read under the same tag and file name (worktree and
+//    absolute-path slips), refuses once a header that resolves to a file the
+//    agent never read while the tag came from another copy, and refuses once
+//    a retry that reuses old line numbers under the tag a stale rejection named.
 // 2. tool_result: when an applied edit damaged the file (omp's parse check,
-//    edit ops written as text, a duplicated boundary, an orphaned block
-//    opener), restores the files and returns an error. Re-sending the
-//    identical edit applies it as written.
+//    edit ops written as text, a shifted range, a duplicated boundary block,
+//    an orphaned block opener), restores the files and returns an error.
+//    Re-sending the identical edit applies it as written.
 // 3. tool_result: after a stale-tag rejection, says where the anchored lines
 //    went, or that the edit is already in the file.
 
@@ -27,6 +28,7 @@ import {
 
 const MAX_VIEWS = 2000;
 const MAX_CONFIRMED = 200;
+const MAX_PENDING = 64;
 
 const isFile = (path) => {
 	try {
@@ -95,6 +97,7 @@ export function createGuard() {
 
 		for (const section of parseSections(input)) {
 			let abs = resolvePath(section.rawPath, cwd);
+			let display = section.rawPath;
 
 			if (!abs) continue;
 
@@ -103,13 +106,14 @@ export function createGuard() {
 
 				if (found.length === 1) {
 					[abs] = found;
+					display = abs;
 					revised = rewriteHeader(revised, section.line, abs, section.tag);
 					notes.push(`hashline-guard: "${section.rawPath}" does not exist; the edit went to ${abs}, the file read under #${section.tag}. Use that path in headers.`);
 				}
 			} else if (section.tag && !known.has(abs)) {
 				const other = tagCandidates(section.rawPath, section.tag, known).filter((p) => p !== abs && isFile(p));
 
-				if (other.length === 1 && !confirmOnce(hash)) {
+				if (other.length === 1 && !confirmOnce(`copy:${hash}`)) {
 					return {
 						block: true,
 						reason: `hashline-guard: [${section.rawPath}#${section.tag}] resolves to ${abs}, which this session never read. Tag #${section.tag} came from ${other[0]} (another checkout or copy). Use [${other[0]}#${section.tag}]. If ${abs} is the file you mean, re-send this identical edit.`,
@@ -122,7 +126,7 @@ export function createGuard() {
 			if (stale && stale.liveTag === section.tag) {
 				const reused = section.anchors.filter((n) => stale.moves.has(n) && !section.anchors.includes(stale.moves.get(n)));
 
-				if (reused.length && !confirmOnce(hash)) {
+				if (reused.length && !confirmOnce(`stale:${hash}`)) {
 					return {
 						block: true,
 						reason: `hashline-guard: under #${section.tag} these line numbers point at other lines. You took them from the older view: ${reused.map((n) => `old ${n} is now ${stale.moves.get(n)}`).join(", ")}. Re-issue with the current numbers. If you mean these exact lines, re-send this identical edit.`,
@@ -130,10 +134,14 @@ export function createGuard() {
 				}
 			}
 
-			sections.push({ ...section, abs, before: section.fileOp ? null : readText(abs) });
+			sections.push({ ...section, abs, display, before: section.fileOp ? null : readText(abs) });
 		}
 
-		if (sections.length) pending.set(event.toolCallId, { hash, sections });
+		if (sections.length) {
+			pending.set(event.toolCallId, { hash, sections });
+			// A call that another hook blocks never reaches tool_result.
+			bounded(pending, MAX_PENDING);
+		}
 
 		if (revised === input) return undefined;
 		const { path: _path, paths: _paths, ...params } = event.input;
@@ -156,7 +164,7 @@ export function createGuard() {
 				if (liveTag === s.tag) continue;
 
 				const hint = staleHint({
-					path: s.rawPath,
+					path: s.display,
 					anchors: s.anchors,
 					body: s.body,
 					view: views.get(`${s.abs}#${s.tag}`),
@@ -187,14 +195,32 @@ export function createGuard() {
 				after: afters[i],
 				resultText: text,
 				ops: s.tag === fileTag(s.before) ? s.ops : [],
-			}).map((f) => `- ${s.rawPath}: ${f}`),
+			}).map((f) => `- ${s.display}: ${f}`),
 		);
 
-		if (!findings.length || confirmOnce(call.hash)) return undefined;
+		if (!findings.length || confirmOnce(`damage:${call.hash}`)) return undefined;
+		const failed = [];
+
 		files.forEach((s, i) => {
-			if (afters[i] !== s.before) writeFileSync(s.abs, s.before);
+			try {
+				// Only undo our own write: skip a file someone changed after the edit.
+				if (afters[i] !== s.before && readText(s.abs) === afters[i]) writeFileSync(s.abs, s.before);
+			} catch (error) {
+				failed.push(`${s.display}: ${error.message}`);
+			}
 		});
-		const headers = files.map((s) => `[${s.rawPath}#${fileTag(s.before)}]`).join(" ");
+
+		if (failed.length) {
+			return {
+				isError: true,
+				content: [
+					...event.content,
+					{ type: "text", text: ["hashline-guard: this edit damaged the file, and undoing it failed:", ...findings, ...failed, "Re-read the file and repair it."].join("\n") },
+				],
+			};
+		}
+
+		const headers = files.map((s) => `[${s.display}#${fileTag(s.before)}]`).join(" ");
 
 		return {
 			isError: true,
